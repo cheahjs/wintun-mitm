@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/cheahjs/wintun-mitm/internal/mitm/types"
 
 	"github.com/google/gopacket"
@@ -22,20 +24,24 @@ type UdpProxy struct {
 	incomingTranslation map[types.NatMapKey]*udpMitmConn
 
 	etherLayerFields types.EtherLayerFields
+
+	logger *zap.SugaredLogger
 }
 
-func MakeNewUdpProxy(pcapHandle *pcap.Handle, outgoingPackets chan []byte, etherLayerFields types.EtherLayerFields) *UdpProxy {
+func MakeNewUdpProxy(logger *zap.SugaredLogger, pcapHandle *pcap.Handle, outgoingPackets chan []byte, etherLayerFields types.EtherLayerFields) *UdpProxy {
 	return &UdpProxy{
 		PcapHandle:          pcapHandle,
 		OutgoingPackets:     outgoingPackets,
 		outgoingTranslation: make(map[types.NatMapKey]*udpMitmConn),
 		incomingTranslation: make(map[types.NatMapKey]*udpMitmConn),
 		etherLayerFields:    etherLayerFields,
+		logger:              logger.With("proto", "udp"),
 	}
 }
 
 func (p *UdpProxy) CreateUDPConn(srcIP net.IP, srcPort uint16) *udpMitmConn {
 	conn := &udpMitmConn{
+		logger:           p.logger.With("src.ip", srcIP, "src.port", srcPort),
 		pcapHandle:       p.PcapHandle,
 		oldSrcIP:         srcIP,
 		oldSrcPort:       srcPort,
@@ -68,7 +74,7 @@ func (p *UdpProxy) ReceivePacketFromTun(packet gopacket.Packet) {
 	p.transMutex.Lock()
 	conn, alreadyExist := p.outgoingTranslation[outgoingNat.Key()]
 	if !alreadyExist {
-		log.Printf("Created new mapping for %v:%v -> %v:%v",
+		p.logger.Infof("Created new mapping for %v:%v -> %v:%v",
 			outgoingNat.SrcIP, outgoingNat.SrcPort, outgoingNat.DstIP, outgoingNat.DstPort)
 		conn = p.CreateUDPConn(outgoingNat.SrcIP, outgoingNat.SrcPort)
 		p.outgoingTranslation[outgoingNat.Key()] = conn

@@ -2,8 +2,9 @@ package mitm
 
 import (
 	"fmt"
-	"log"
 	"net"
+
+	"go.uber.org/zap"
 
 	"github.com/cheahjs/wintun-mitm/internal/mitm/udp"
 
@@ -21,6 +22,7 @@ import (
 )
 
 type MitmTun struct {
+	logger           *zap.SugaredLogger
 	session          wintun.Session
 	readWait         windows.Handle
 	outgoingPackets  chan []byte
@@ -31,30 +33,30 @@ type MitmTun struct {
 	etherLayerFields types.EtherLayerFields
 }
 
-func NewMitmTun(session wintun.Session, luid winipcfg.LUID) *MitmTun {
-	log.Println("Looking for default route interface")
+func NewMitmTun(logger *zap.SugaredLogger, session wintun.Session, luid winipcfg.LUID) *MitmTun {
+	logger.Info("Looking for default route interface")
 	defaultLUID, defaultInterfaceIndex, defaultGatewayIP, err := network.GetDefaultInterface(luid)
 	if err != nil {
-		log.Fatalf("Failed to get default interface: %v", err)
+		logger.Fatalf("Failed to get default interface: %v", err)
 	}
 	if defaultLUID == 0 {
-		log.Fatal("Failed to get default interface")
+		logger.Fatal("Failed to get default interface")
 	}
 	if defaultGatewayIP == nil {
-		log.Fatal("Failed to get IP of default gateway")
+		logger.Fatal("Failed to get IP of default gateway")
 	}
 	defaultGUID, _ := defaultLUID.GUID()
-	log.Printf("Found default network interface with GUID %v index %v", defaultGUID, defaultInterfaceIndex)
+	logger.Infof("Found default network interface with GUID %v index %v", defaultGUID, defaultInterfaceIndex)
 
-	log.Println("Fetching default interface IP and MAC")
+	logger.Info("Fetching default interface IP and MAC")
 	iface, err := net.InterfaceByIndex(int(defaultInterfaceIndex))
 	if err != nil {
-		log.Fatalf("Failed to get default interface with index %v: %v", defaultInterfaceIndex, err)
+		logger.Fatalf("Failed to get default interface with index %v: %v", defaultInterfaceIndex, err)
 	}
 
 	addrs, err := iface.Addrs()
 	if err != nil {
-		log.Fatalf("Failed to get default interface unicast addresses: %v", err)
+		logger.Fatalf("Failed to get default interface unicast addresses: %v", err)
 	}
 	var ipv4Addr net.IP
 	for _, addr := range addrs {
@@ -63,20 +65,23 @@ func NewMitmTun(session wintun.Session, luid winipcfg.LUID) *MitmTun {
 		}
 	}
 	if ipv4Addr == nil {
-		log.Fatal("Failed to find default interface IPv4 address")
+		logger.Fatal("Failed to find default interface IPv4 address")
 	}
+	logger.Infof("Found default interface with IP %v", ipv4Addr)
 
-	log.Println("Searching ARP cache for gateway MAC")
+	logger.Info("Searching ARP cache for gateway")
 	defaultGatewayMAC := arp.Search(defaultGatewayIP.String())
 	if defaultGatewayMAC == "" {
-		log.Fatalf("Failed to find MAC address for gateway IP %v", defaultGatewayIP)
+		logger.Fatalf("Failed to find MAC address for gateway IP %v", defaultGatewayIP)
 	}
 	defaultGatewayMACParsed, err := net.ParseMAC(defaultGatewayMAC)
 	if err != nil {
-		log.Fatalf("Failed to parse gateway MAC %v: %v", defaultGatewayMAC, err)
+		logger.Fatalf("Failed to parse gateway MAC %v: %v", defaultGatewayMAC, err)
 	}
+	logger.Infof("Found default gateway MAC %v", defaultGatewayMAC)
 
 	return &MitmTun{
+		logger:          logger,
 		session:         session,
 		readWait:        session.ReadWaitEvent(),
 		outgoingPackets: make(chan []byte, 100),
@@ -90,16 +95,16 @@ func NewMitmTun(session wintun.Session, luid winipcfg.LUID) *MitmTun {
 }
 
 func (m *MitmTun) Start() {
-	log.Println("Starting pcap")
+	m.logger.Info("Starting pcap")
 	defaultGUID, _ := m.defaultLUID.GUID()
 	handle, err := pcap.OpenLive(fmt.Sprintf("\\Device\\NPF_%v", defaultGUID), 2700, true, pcap.BlockForever)
 	if err != nil {
-		log.Fatalf("Failed to open pcap handle on outgoing interface: %v", err)
+		m.logger.Fatalf("Failed to open pcap handle on outgoing interface: %v", err)
 	}
-	log.Println("Opened pcap")
+	m.logger.Info("Opened pcap")
 	m.pcapHandle = handle
-	m.tcpProxy = tcp.MakeNewTcpProxy(handle, m.outgoingPackets, m.etherLayerFields)
-	m.udpProxy = udp.MakeNewUdpProxy(handle, m.outgoingPackets, m.etherLayerFields)
+	m.tcpProxy = tcp.MakeNewTcpProxy(m.logger, handle, m.outgoingPackets, m.etherLayerFields)
+	m.udpProxy = udp.MakeNewUdpProxy(m.logger, handle, m.outgoingPackets, m.etherLayerFields)
 	go m.tcpProxy.InactiveCheck()
 	go m.udpProxy.InactiveCheck()
 	go m.receivePackets()
@@ -114,7 +119,7 @@ func (m *MitmTun) Close() {
 }
 
 func (m *MitmTun) receivePackets() {
-	log.Println("Starting to receive packets from TUN")
+	m.logger.Info("Starting to receive packets from TUN")
 	for {
 		var buffer [0xFFFF]byte
 		packet, err := m.session.ReceivePacket()
@@ -128,11 +133,11 @@ func (m *MitmTun) receivePackets() {
 			windows.WaitForSingleObject(m.readWait, windows.INFINITE)
 			continue
 		case windows.ERROR_HANDLE_EOF:
-			log.Fatalln("ReceivePacket returned EOF")
+			m.logger.Fatal("ReceivePacket returned EOF")
 		case windows.ERROR_INVALID_DATA:
-			log.Fatalln("ReceivePacket returned invalid data")
+			m.logger.Fatal("ReceivePacket returned invalid data")
 		default:
-			log.Printf("ReceivePacket returned an error: %v", err)
+			m.logger.Errorf("ReceivePacket returned an error: %v", err)
 		}
 	}
 }
@@ -163,21 +168,27 @@ func (m *MitmTun) sendPackets() {
 		} else {
 			switch err {
 			case windows.ERROR_HANDLE_EOF:
-				log.Fatalln("AllocateSendPacket returned EOF")
+				m.logger.Fatal("AllocateSendPacket returned EOF")
 			case windows.ERROR_BUFFER_OVERFLOW:
 				// Ring full, drop packets
 				continue
 			default:
-				log.Printf("AllocateSendPacket returned an error: %v", err)
+				m.logger.Errorf("AllocateSendPacket returned an error: %v", err)
 			}
 		}
 	}
 }
 
 func (m *MitmTun) readPacketsFromRealInterface() {
-	log.Println("Starting to read packets from pcap")
+	m.logger.Info("Starting to read packets from pcap")
 	packetSource := gopacket.NewPacketSource(m.pcapHandle, m.pcapHandle.LinkType())
 	for packetData := range packetSource.Packets() {
+		if packetData.NetworkLayer() == nil {
+			continue
+		}
+		if packetData.NetworkLayer().LayerType() != layers.LayerTypeIPv4 {
+			continue
+		}
 		if packetData.TransportLayer() == nil {
 			continue
 		}

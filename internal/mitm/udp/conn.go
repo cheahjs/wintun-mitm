@@ -1,9 +1,10 @@
 package udp
 
 import (
-	"log"
 	"net"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/cheahjs/wintun-mitm/internal/mitm/types"
 
@@ -14,6 +15,7 @@ import (
 
 // udpMitmConn handles the connection for a single tuple of (src,dst)
 type udpMitmConn struct {
+	logger           *zap.SugaredLogger
 	pcapHandle       *pcap.Handle
 	oldSrcIP         net.IP
 	oldSrcPort       uint16
@@ -50,12 +52,12 @@ func (c *udpMitmConn) SendPacket(pcapHandle *pcap.Handle, packet gopacket.Packet
 		gopacket.Payload(udpLayer.Payload),
 	)
 	if err != nil {
-		log.Printf("Failed to serialize layer: %v", err)
+		c.logger.Errorf("Failed to serialize layer: %v", err)
 		return
 	}
 	err = pcapHandle.WritePacketData(newBuffer.Bytes())
 	if err != nil {
-		log.Printf("Failed to call WritePacketData: %v", err)
+		c.logger.Errorf("Failed to call WritePacketData: %v", err)
 	}
 }
 
@@ -80,7 +82,7 @@ func (c *udpMitmConn) ReceivePacket(packet gopacket.Packet) {
 		gopacket.Payload(udpLayer.Payload),
 	)
 	if err != nil {
-		log.Printf("Failed to serialize layer: %v", err)
+		c.logger.Errorf("Failed to serialize layer: %v", err)
 		return
 	}
 	c.proxy.OutgoingPackets <- newBuffer.Bytes()

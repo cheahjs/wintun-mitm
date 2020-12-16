@@ -1,10 +1,11 @@
 package tcp
 
 import (
-	"log"
 	"net"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/cheahjs/wintun-mitm/internal/mitm/types"
 
@@ -22,20 +23,24 @@ type TcpProxy struct {
 	incomingTranslation map[types.NatMapKey]*tcpMitmConn
 
 	etherLayerFields types.EtherLayerFields
+
+	logger *zap.SugaredLogger
 }
 
-func MakeNewTcpProxy(pcapHandle *pcap.Handle, outgoingPackets chan []byte, etherLayerFields types.EtherLayerFields) *TcpProxy {
+func MakeNewTcpProxy(logger *zap.SugaredLogger, pcapHandle *pcap.Handle, outgoingPackets chan []byte, etherLayerFields types.EtherLayerFields) *TcpProxy {
 	return &TcpProxy{
 		PcapHandle:          pcapHandle,
 		OutgoingPackets:     outgoingPackets,
 		outgoingTranslation: make(map[types.NatMapKey]*tcpMitmConn),
 		incomingTranslation: make(map[types.NatMapKey]*tcpMitmConn),
 		etherLayerFields:    etherLayerFields,
+		logger:              logger.With("proto", "tcp"),
 	}
 }
 
 func (p *TcpProxy) CreateTCPConn(srcIP net.IP, srcPort uint16) *tcpMitmConn {
 	conn := &tcpMitmConn{
+		logger:           p.logger.With("src.ip", srcIP, "src.port", srcPort),
 		pcapHandle:       p.PcapHandle,
 		oldSrcIP:         srcIP,
 		oldSrcPort:       srcPort,
@@ -68,7 +73,7 @@ func (p *TcpProxy) ReceivePacketFromTun(packet gopacket.Packet) {
 	p.transMutex.Lock()
 	conn, alreadyExist := p.outgoingTranslation[outgoingNat.Key()]
 	if !alreadyExist {
-		log.Printf("Created new mapping for %v:%v -> %v:%v",
+		p.logger.Infof("Created new mapping for %v:%v -> %v:%v",
 			outgoingNat.SrcIP, outgoingNat.SrcPort, outgoingNat.DstIP, outgoingNat.DstPort)
 		conn = p.CreateTCPConn(outgoingNat.SrcIP, outgoingNat.SrcPort)
 		p.outgoingTranslation[outgoingNat.Key()] = conn
@@ -104,14 +109,14 @@ func (p *TcpProxy) InactiveCheck() {
 		p.transMutex.Lock()
 		for key, conn := range p.incomingTranslation {
 			if conn.Expired() {
-				log.Printf("Mapping for %v -> %v expired",
+				p.logger.Infof("Mapping for %v -> %v expired",
 					key.Src, key.Dst)
 				delete(p.incomingTranslation, key)
 			}
 		}
 		for key, conn := range p.outgoingTranslation {
 			if conn.Expired() {
-				log.Printf("Mapping for %v -> %v expired",
+				p.logger.Infof("Mapping for %v -> %v expired",
 					key.Src, key.Dst)
 				delete(p.outgoingTranslation, key)
 			}
